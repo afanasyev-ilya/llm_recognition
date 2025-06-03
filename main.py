@@ -63,6 +63,8 @@ class Detection:
 
         self.imagenet_labels = download_imagenet_labels()
 
+        self.cropped_classifier = resnet50(pretrained=True).eval().to(self.device)
+
     def load_image(self, img_path):
         image = Image.open(img_path).convert("RGB")
 
@@ -73,11 +75,15 @@ class Detection:
             scale = max_size / float(max(w, h))
             new_w, new_h = int(w * scale), int(h * scale)
             image = image.resize((new_w, new_h))
+    
+        return image
 
-        image_tensor = transforms.ToTensor()(image).to(self.device)
-        return image_tensor
+    def img2tensor(self, image):
+        return transforms.ToTensor()(image).to(self.device)
 
-    def detect_borders(self, image_tensor):
+    def detect_borders(self, image):
+        image_tensor = self.img2tensor(image)
+
         start = time.perf_counter()
         with torch.no_grad():
             outputs = self.model([image_tensor])
@@ -101,6 +107,34 @@ class Detection:
 
         return filtered_boxes, filtered_labels, filtered_scores
 
+    def classify_cropped_parts(self, image, boxes):
+        # 7. Try to obtain better labels
+        preprocess = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                std =[0.229, 0.224, 0.225]),
+        ])
+
+        labels = []
+        conf_levels = []
+        for i, box in enumerate(boxes):
+            xmin, ymin, xmax, ymax = [int(b) for b in box]
+            crop_images = image.crop((xmin, ymin, xmax, ymax))
+
+            input_tensor = preprocess(crop_images).unsqueeze(0).to(self.device)
+            with torch.no_grad():
+                logits = self.cropped_classifier(input_tensor)
+                probs  = torch.softmax(logits[0], dim=0)
+
+            top1_idx = torch.argmax(probs).item()
+            top1_conf = probs[top1_idx].item()
+            top1_label = self.imagenet_labels[top1_idx]
+            labels.append(top1_label)
+            conf_levels.append(top1_conf)
+        return labels, conf_levels
+
     def build_naive_summary(self, boxes, labels, scores):
         vision_summary = []
         for box, lbl, sc in zip(boxes, labels, scores):
@@ -113,7 +147,7 @@ class Detection:
         # vision_summary is now a list of strings like "person at (50,320)-(120,700), score 0.87"
         return vision_summary
     
-    def save_image_with_boxes(self, image, boxes, labels, scores):
+    def save_image_with_boxes(self, image, boxes, labels, scores, out_path):
         # 7. Save recognition results to file
         original_image = image
         draw_img = original_image.copy()
@@ -140,58 +174,38 @@ class Detection:
             draw.text(text_position, label_text, fill="white", font=font)
 
         # 4. Save the result
-        output_path = "images/annotated_image.jpg"
-        draw_img.save(output_path)
-        print(f"Saved annotated image to {output_path!r}")
+        draw_img.save(out_path)
+        print(f"Saved annotated image to {out_path!r}")
+
 
 
 def main():
     detector = Detection()
 
-    names = ["images/cats_house.jpg", "images/city.jpg", "images/summer.jpg"]
+    names = ["cats_house.jpg", "city.jpg", "summer.jpg"]
+    input_names = [("images/" + name) for name in names]
+    output_names = [("artifacts/" + name) for name in names]
 
-    images = []
-    for name in names:
-        image = detector.load_image("images/cats_house.jpg")
-        images.append(image)
+    for in_path, out_path in zip(input_names, output_names):
+        image = detector.load_image(in_path)
 
-    for image in images:
+        start = time.perf_counter()
         boxes, labels, scores = detector.detect_borders(image)
+        box_labels, box_conf_levels = detector.classify_cropped_parts(image, boxes)
+        end = time.perf_counter()
+        elapsed = end - start  # seconds per frame
+        fps = 1.0 / elapsed
+        print(f"Full detection performance: {elapsed:.3f} s → {fps:.1f} FPS")
 
-    print(detector.build_naive_summary(boxes, labels, scores))
+        i = 0
+        for box, label, conf_level in zip(boxes, box_labels, box_conf_levels):
+            print(f"Box {i}: ({box[0]:.2f},{box[1]:.2f},{box[2]:.2f},{box[3]:.2f}) → '{label}' ({conf_level:.2f})\n")
+            i += 1
+
+        detector.save_image_with_boxes(image, boxes, labels, scores, out_path)
+
+
 
 
 main()
 
-
-'''
-# 7. Try to obtain better labels
-preprocess = transforms.Compose([
-    transforms.Resize(256),
-    transforms.CenterCrop(224),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                         std =[0.229, 0.224, 0.225]),
-])
-
-
-imagenet_labels = download_imagenet_labels()
-
-cropped_classifier = resnet50(pretrained=True).eval().to(device)
-
-# ─── D. Crop + classify each box ───────────────────────────────────────────────
-for i, box in enumerate(filtered_boxes):
-    xmin, ymin, xmax, ymax = [int(b) for b in box]
-    crop_images = image.crop((xmin, ymin, xmax, ymax))
-
-    input_tensor = preprocess(crop_images).unsqueeze(0).to(device)
-    with torch.no_grad():
-        logits = cropped_classifier(input_tensor)
-        probs  = torch.softmax(logits[0], dim=0)
-
-    top1_idx = torch.argmax(probs).item()
-    top1_conf = probs[top1_idx].item()
-    top1_label = imagenet_labels[top1_idx]
-
-    print(f"Box {i}: ({xmin},{ymin},{xmax},{ymax}) → '{top1_label}' ({top1_conf:.2f})")
-'''
