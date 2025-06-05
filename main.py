@@ -53,17 +53,21 @@ class Detection:
         print("device ", self.device, " is available")
 
         # model = fasterrcnn_resnet50_fpn(pretrained=True).to(self.device)
-        self.model = retinanet_resnet50_fpn(pretrained=True).to(self.device)
-        self.model.eval()
+        self.borders_detector = retinanet_resnet50_fpn(pretrained=True).to(self.device)
+        self.borders_detector.eval()
+        #if self.device.type == 'cuda':
+        #    self.borders_detector = self.borders_detector.half()
 
         # warmup
         warmup_image = torch.ones([3, 256, 256]).type(torch.float32).to(self.device)
         with torch.no_grad():
-            _ = self.model([warmup_image])
+            _ = self.borders_detector([warmup_image])
 
         self.imagenet_labels = download_imagenet_labels()
 
         self.cropped_classifier = resnet50(pretrained=True).eval().to(self.device)
+        #if self.device.type == 'cuda':
+        #    self.cropped_classifier = self.borders_detector.half()
 
     def load_image(self, img_path):
         image = Image.open(img_path).convert("RGB")
@@ -86,7 +90,7 @@ class Detection:
 
         start = time.perf_counter()
         with torch.no_grad():
-            outputs = self.model([image_tensor])
+            outputs = self.borders_detector([image_tensor])
         end = time.perf_counter()
         elapsed = end - start  # seconds per frame
         fps = 1.0 / elapsed
@@ -135,17 +139,20 @@ class Detection:
             conf_levels.append(top1_conf)
         return labels, conf_levels
 
-    def build_naive_summary(self, boxes, labels, scores):
+    def build_summary(self, boxes, labels, scores):
         vision_summary = []
+        #for box, lbl, sc in zip(boxes, labels, scores):
+        #    xmin, ymin, xmax, ymax = [int(b) for b in box]
+        #    vision_summary.append(
+        #        f"{lbl} at ({xmin},{ymin})-({xmax},{ymax}), score {sc:.2f}"
+        #    )
+        i = 0
+        summary = ""
         for box, lbl, sc in zip(boxes, labels, scores):
-            class_name = COCO_CLASSES[lbl]
-            print(class_name)
-            xmin, ymin, xmax, ymax = [int(b) for b in box]
-            vision_summary.append(
-                f"{class_name} at ({xmin},{ymin})-({xmax},{ymax}), score {sc:.2f}"
-            )
-        # vision_summary is now a list of strings like "person at (50,320)-(120,700), score 0.87"
-        return vision_summary
+            summary += f"Box {i}: ({box[0]:.2f},{box[1]:.2f},{box[2]:.2f},{box[3]:.2f}) → '{lbl}' ({sc:.2f})\n"
+            i += 1
+        
+        return summary
     
     def save_image_with_boxes(self, image, boxes, labels, scores, out_path):
         # 7. Save recognition results to file
@@ -159,11 +166,10 @@ class Detection:
             font = ImageFont.load_default()
 
         for box, lbl, sc in zip(boxes, labels, scores):
-            class_name = COCO_CLASSES[lbl]
             xmin, ymin, xmax, ymax = [box[0], box[1], box[2], box[3]]
 
             # Build label text
-            label_text = f"{class_name} {sc:.2f}"
+            label_text = f"{lbl} {sc:.2f}"
 
             # Draw a filled red rectangle behind the text
             margin = 2
@@ -175,7 +181,6 @@ class Detection:
 
         # 4. Save the result
         draw_img.save(out_path)
-        print(f"Saved annotated image to {out_path!r}")
 
 
 
@@ -190,19 +195,17 @@ def main():
         image = detector.load_image(in_path)
 
         start = time.perf_counter()
-        boxes, labels, scores = detector.detect_borders(image)
+        boxes, _, _ = detector.detect_borders(image)
         box_labels, box_conf_levels = detector.classify_cropped_parts(image, boxes)
         end = time.perf_counter()
         elapsed = end - start  # seconds per frame
         fps = 1.0 / elapsed
         print(f"Full detection performance: {elapsed:.3f} s → {fps:.1f} FPS")
 
-        i = 0
-        for box, label, conf_level in zip(boxes, box_labels, box_conf_levels):
-            print(f"Box {i}: ({box[0]:.2f},{box[1]:.2f},{box[2]:.2f},{box[3]:.2f}) → '{label}' ({conf_level:.2f})\n")
-            i += 1
+        summary = detector.build_summary(boxes, box_labels, box_conf_levels)
+        #print(summary)
 
-        detector.save_image_with_boxes(image, boxes, labels, scores, out_path)
+        detector.save_image_with_boxes(image, boxes, box_labels, box_conf_levels, out_path)
 
 
 
