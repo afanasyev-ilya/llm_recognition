@@ -48,26 +48,31 @@ def download_imagenet_labels():
 
 
 class Detection:
-    def __init__(self):
+    def __init__(self, use_half = True):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print("device ", self.device, " is available")
+
+        self.use_half = use_half
+        if self.device.type != 'cuda':
+            self.use_half = False
 
         # model = fasterrcnn_resnet50_fpn(pretrained=True).to(self.device)
         self.borders_detector = retinanet_resnet50_fpn(pretrained=True).to(self.device)
         self.borders_detector.eval()
-        #if self.device.type == 'cuda':
-        #    self.borders_detector = self.borders_detector.half()
+        if self.use_half:
+            self.borders_detector = self.borders_detector.half()
 
         # warmup
-        warmup_image = torch.ones([3, 256, 256]).type(torch.float32).to(self.device)
+        model_dtype = next(self.borders_detector.parameters()).dtype
+        warmup_image = torch.ones([3, 256, 256]).type(model_dtype).to(self.device)
         with torch.no_grad():
             _ = self.borders_detector([warmup_image])
 
         self.imagenet_labels = download_imagenet_labels()
 
         self.cropped_classifier = resnet50(pretrained=True).eval().to(self.device)
-        #if self.device.type == 'cuda':
-        #    self.cropped_classifier = self.borders_detector.half()
+        if self.use_half:
+            self.cropped_classifier = self.borders_detector.half()
 
     def load_image(self, img_path):
         image = Image.open(img_path).convert("RGB")
@@ -83,18 +88,15 @@ class Detection:
         return image
 
     def img2tensor(self, image):
-        return transforms.ToTensor()(image).to(self.device)
+        model_dtype = next(self.borders_detector.parameters()).dtype
+        tensor = transforms.ToTensor()(image).to(self.device).to(dtype=model_dtype)
+        return tensor
 
     def detect_borders(self, image):
         image_tensor = self.img2tensor(image)
 
-        start = time.perf_counter()
         with torch.no_grad():
             outputs = self.borders_detector([image_tensor])
-        end = time.perf_counter()
-        elapsed = end - start  # seconds per frame
-        fps = 1.0 / elapsed
-        print(f"Inner detection performance: {elapsed:.3f} s → {fps:.1f} FPS")
 
         # outputs is a list (length=1) of dicts
         detections = outputs[0]
@@ -128,6 +130,9 @@ class Detection:
             crop_images = image.crop((xmin, ymin, xmax, ymax))
 
             input_tensor = preprocess(crop_images).unsqueeze(0).to(self.device)
+            
+            model_dtype = next(self.cropped_classifier.parameters()).dtype
+            input_tensor = input_tensor.to(dtype=model_dtype)
             with torch.no_grad():
                 logits = self.cropped_classifier(input_tensor)
                 probs  = torch.softmax(logits[0], dim=0)
@@ -185,7 +190,7 @@ class Detection:
 
 
 def main():
-    detector = Detection()
+    detector = Detection(use_half = True)
 
     names = ["cats_house.jpg", "city.jpg", "summer.jpg"]
     input_names = [("images/" + name) for name in names]
@@ -206,8 +211,6 @@ def main():
         #print(summary)
 
         detector.save_image_with_boxes(image, boxes, box_labels, box_conf_levels, out_path)
-
-
 
 
 main()
